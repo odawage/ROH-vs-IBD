@@ -43,4 +43,4 @@ echo "I am working with the conda env: "$CONDA_PREFIX
 
 ##Run 
 
-Rscript --vanilla Array_rewrite_Gorssen_V2_vask.R "$name"
+Rscript --vanilla Gorssen_V3.R "$name"
