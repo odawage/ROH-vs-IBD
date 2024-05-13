@@ -5,6 +5,15 @@ Code related to paper ""
   The scripts are written for SLURM, R 4.3.3 and PLINK 1.9 and 2.0
   The "Scenarios" file is a list of all paramenter combinations, dataset, and marker densities. 
 
+# Folder structure 
+
+- Code
+  - Dataset
+    - [name of dataset]
+      - [set all raw ADAM files here]
+
+The rest of the result folder are created by the scripts
+
 # Order of running the files :yellow_heart:
 
 1. Raw_to_PedMap.R
@@ -31,4 +40,8 @@ Code related to paper ""
 
 11. FROH_FIBD.R
     - Finds FROH and FIBD for all animals.
-      One overall, and one per BIN estimate. 
+      One overall, and one per BIN estimate.
+
+# Licensing 
+
+Creative commons. Live, laugh, love 🫶
