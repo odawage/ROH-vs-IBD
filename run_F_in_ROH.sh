@@ -29,4 +29,4 @@ echo "I am working with the conda env: "$CONDA_PREFIX
 
 ## Run 
 
-Rscript --vanilla Hetero_dataset_gen_vask.R
+Rscript --vanilla F_in_ROH.R
