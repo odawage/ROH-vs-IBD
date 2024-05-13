@@ -37,4 +37,4 @@ echo "I am working with the conda env: "$CONDA_PREFIX
 
 ## Run 
 
-Rscript --vanilla IBD_segments_vask.R "$name"
+Rscript --vanilla IBD_segments.R "$name"
