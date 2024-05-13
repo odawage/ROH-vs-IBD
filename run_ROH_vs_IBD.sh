@@ -45,6 +45,5 @@ echo "I am working with the conda env: "$CONDA_PREFIX
 
 ## Run 
 
-Rscript --vanilla ROH_vs_IBD_vask.R "$dataset" "$dens" "$parameter"
+Rscript --vanilla ROH_vs_IBD.R "$dataset" "$dens" "$parameter"
 
-#Rscript --vanilla ROH_edit.R "$dataset" "$dens" "$parameter"
