@@ -12,7 +12,7 @@ Code related to paper ""
     - [name of dataset]
       - [set all raw ADAM files here]
 
-The rest of the result folder are created by the scripts
+The rest of the result folders are created by the scripts
 
 # Order of running the files :yellow_heart:
 
