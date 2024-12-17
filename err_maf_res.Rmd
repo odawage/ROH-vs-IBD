@@ -1,0 +1,1543 @@
+---
+title: "res err maf"
+date: "2024-10-29"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+editor_options: 
+  markdown: 
+    wrap: 85
+---
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, cache = FALSE 
+)
+```
+ plotte error mot ikke error. FROH, velge en generasjon
+
+```{r}
+
+library(tidyverse)
+library(data.table)
+library(ggbeeswarm)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(car)
+library(broom)
+```
+
+
+```{r}
+
+input.dir <- "/mnt/users/odwa/PLINK/Code/Dataset"
+#dataset = "NE100_100cm_rep1"
+inped = "beforeQC"
+tmp.dir = "/net/fs-2/scale/OrionStore/Scratch/odwa/paper-1"
+datasets = c("NE200_100cm_rep0", "NE200_100cm_rep1", "NE200_100cm_rep2", "NE100_100cm_rep1", "NE100_100cm_rep2")
+densities <- c("Full_Dens", "Half_Dens")
+methods <- c("Meyermans", "Default", "Norm", "Norm_small")
+errors <- c(0, 0.01, 0.02, 0.04)
+maf <- c(0, 0.01, 0.05)
+# Generate all combinations of dataset, density, method, and err
+combinations_err <- expand.grid(dataset = datasets, dens = densities, method = methods, err = errors)
+combinations_maf <- expand.grid(dataset = datasets, dens = densities, method = methods, maf = maf)
+
+```
+
+
+```{r}
+# genome length each dataset 
+
+length <- data.frame(Dataset = character(), length_bpp = numeric())
+for (d in unique(combinations_err$dataset)) {
+  md <- fread(paste0(input.dir,"/",d,"/R_output/markerPosition_kb.txt"))
+  l <- max(md$position_bpp)- min(md$position_bpp)
+  length <- rbind(length, data.frame(Dataset = d, length_bpp = l))
+}
+```
+
+### True IBD
+  
+```{r}
+FIBD <- fread(paste0(input.dir,"/Correlation/F_IBD.txt"))
+```
+
+
+
+```{r}
+breakpoints <- c(0, 1000, 2000, 3000, 4000, 5000, 9000, Inf)
+labels <- c("0_1MB", "1_2MB", "2_3MB", "3_4MB", "4_5MB", "5_9MB", "9MB+")
+```
+
+## Loading Data Frames 
+
+
+```{r}
+
+F_ROH_ID <- data_frame()
+
+for (i in 1:nrow(combinations_err)) {
+ dataset <- combinations_err$dataset[i]
+  dens <- combinations_err$dens[i]
+  method <- combinations_err$method[i]
+  err <- combinations_err$err[i]
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  
+  F_ROH_ID_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",err,"/ROH_analyse.hom.indiv")) %>%
+    select(c(IID, KB, NSEG)) %>%
+    rename(ID = IID) %>%
+    filter(ID %in% ped$id) %>%
+    mutate( Dataset = dataset, Dens = dens, Method = method, Err = err)
+
+  F_ROH_ID_t <- left_join(F_ROH_ID_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  F_ROH_ID = rbind(F_ROH_ID, F_ROH_ID_t)
+
+} 
+  F_ROH_ID <- left_join(F_ROH_ID, length, by= "Dataset")
+
+  F_ROH_ID <- F_ROH_ID %>% 
+    mutate(FROH = KB/(length_bpp/1000))
+
+```
+
+```{r}
+F_ROH_ID <- left_join(F_ROH_ID, FIBD, by = c("ID" = "ID", "Dataset"= "dataset")) %>%
+  replace(is.na(.), 0)
+```
+
+
+
+```{r}
+ROH_err <- data.frame()
+for (i in 1:nrow(combinations_err)) {
+  dataset <- combinations_err$dataset[i]
+  dens <- combinations_err$dens[i]
+  method <- combinations_err$method[i]
+  err <- combinations_err$err[i]
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  
+  ROH_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",err,"/ROH_analyse.hom")) %>%
+    select(c(IID, KB, NSNP)) %>%
+    rename(ID = IID) %>%
+    filter(ID %in% ped$id) %>%
+    group_by(ID) %>%
+    mutate(run = row_number(),
+           Dataset = dataset, Dens = dens, Method = method, Err = err)
+
+  ROH_t <- left_join(ROH_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  
+  ROH_err = rbind(ROH_err, ROH_t)
+}
+
+# Use cut to create the bin_vec
+bin_vec <- cut(ROH_err$KB, breaks = breakpoints, labels = labels, right = FALSE)
+
+bin_vec_fac_2 <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
+
+ROH_err$BIN <- bin_vec_fac_2
+
+
+```
+
+```{r err distr and Froh table}
+o <- ROH_err %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,Err,Method,Generation) %>% 
+  summarise(n = n(),
+            mean_l = mean(KB), 
+            SE_l = round(sd(KB) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Generation, values_from = c(mean_l, SE_l))
+
+o2 <- F_ROH_ID %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,Err,Method,Generation) %>% 
+  summarise(n = n(),
+            mean_FROH = mean(FROH), 
+            SE_FROH = round(sd(FROH) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Generation, values_from = c(mean_FROH, SE_FROH))
+
+
+o3 <- left_join(o, o2, by=c("Err","Dens","Method")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","Err","Method")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+err_FROH_o3 <-  o3 %>%
+  select(all_of(sorted_column_names))
+```
+
+
+
+```{r err distr and Froh table, subset }
+o <- ROH_err %>% 
+    mutate(Generation = birth) %>% 
+  filter(Generation %in% c(100)) %>% 
+  group_by(Dens,Err,Method) %>% 
+  summarise(n = n(),
+            mean_l = mean(KB), 
+            SE_l = round(sd(KB) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_l, SE_l))
+
+o2 <- F_ROH_ID %>% 
+    mutate(Generation = birth) %>% 
+    filter(Generation %in% c(100)) %>% 
+  group_by(Dens,Err,Method) %>% 
+  summarise(n = n(),
+            mean_FROH = mean(FROH), 
+            SE_FROH = round(sd(FROH) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_FROH, SE_FROH))
+
+
+o3 <- left_join(o, o2, by=c("Err","Dens")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","Err")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+err_FROH_100 <-  o3 %>%
+  select(all_of(sorted_column_names))
+```
+```{r}
+
+
+err_FROH_100 %>% 
+  select(-contains("_l_")) %>% 
+  tibble() 
+```
+
+
+```{r}
+# Number of ROH found per individual
+ROH_err %>% 
+  group_by(Dataset,Dens,Method,Err,ID) %>% 
+  mutate(n= n()) %>% 
+  ggplot(aes(x = factor(birth), y = n, colour = factor(Err)))+
+  geom_boxplot(outlier.size = 0.2)+
+  facet_grid(rows = vars(Method),cols = vars(Dens))+
+    theme( legend.position = "top") +
+  labs(title = "No. of ROH in one individual")
+  
+```
+
+```{r}
+ROH_err %>% 
+  ggplot(aes(x = factor(birth), y = log10(KB), colour = factor(Err)))+
+  geom_boxplot(outlier.size = 0.2)+
+  facet_grid(rows = vars(Method),cols = vars(Dens))+
+    theme( legend.position = "top") 
+  
+```
+```{r}
+F_ROH_ID %>% 
+  ggplot(aes(x = factor(birth), y = FROH, colour = factor(Err)))+
+  geom_boxplot(outlier.size = 0.2)+
+  facet_grid(rows = vars(Method),cols = vars(Dens))+
+    theme( legend.position = "top") 
+  
+```
+
+**THIS IS ONLY FOR GENERATION 100**
+
+```{r}
+F_ROH_ID %>% 
+  filter(birth == 100) %>% 
+  mutate(Err = factor(Err)) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  pivot_wider(names_from = Err , values_from = FROH) %>% 
+  pivot_longer(cols = starts_with("0.0"), names_to = "Err", values_to = "FROH") %>% 
+  rename(Err_0 = "0") %>% 
+  ggplot(aes(x = Err_0, y = FROH, colour = factor(Err) ))+
+  geom_point(size = 0.3)+
+  geom_line(aes(y = Err_0), colour = "black", )+
+  facet_grid(rows = vars(Method), cols = vars(Dens))+
+  theme_minimal()+
+  theme( legend.position = "top") +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  labs(color = "Error rate", x = expression(paste(F[ROH]," for Error rate = 0")), y = expression(paste(F[ROH])))
+```
+
+
+```{r}
+# table 
+
+df_tbl <- F_ROH_ID %>% 
+  filter(birth %in% c(20,40,100)) %>% 
+  mutate(Err = factor(Err)) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  pivot_wider(names_from = Err , values_from = FROH) %>% 
+  pivot_longer(cols = starts_with("0.0"), names_to = "Err", values_to = "FROH") %>% 
+  rename(Err_0 = "0") %>% 
+  mutate(Method = factor(Method, c("Norm_small","Norm","Default","Meyermans"))) %>% 
+  group_by(Dens,Err,Method,birth) %>%
+  mutate(correlation = round(cor(FROH, Err_0), 4),
+         xpos = min(F_IBD_BPP, na.rm = TRUE),
+         ypos =0.95 + ifelse(Dens =="Full_Dens",0.10,0 ), 
+         diff = round(mean(FROH - Err_0),2) )
+
+
+# Calculate regression equations and R-squared values for each group
+regressions_tbl <- df_tbl %>%
+  do(tidy(lm(Err_0 ~ FROH, data = .))) %>%
+  select(!std.error:p.value) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  mutate(eq = paste0("y = ",round(`(Intercept)`,2),"+x", round(`FROH`,2) ),
+        beta = paste0(round(`FROH`,2) ),
+         ypos = 0.75 + ifelse(Dens =="Full_Dens",0.10,0 ))
+
+regs <- left_join(regressions_tbl, unique(df_tbl[,c("Dens","Method","Err","birth", "correlation","diff")]),
+                  by = c("Dens","Method","Err","birth"),
+                  relationship = "one-to-many")
+
+regs_w <- regs %>%
+  select(c("Dens","Err","Method","birth","correlation","beta","diff")) %>% 
+  rename(Dens  = "Dens",
+         Method = "Method", 
+         Corr = "correlation",
+         Generation = "birth") %>% 
+  pivot_wider(names_from = Method, values_from = c( beta, Corr, diff))
+
+
+ 
+column_names <- names(regs_w)
+
+non_numeric_columns <- c("Err","Dens","Generation")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+FROHvserr0 <- regs_w %>%
+  select(all_of(sorted_column_names))
+
+write.table(FROHvserr0, file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/beta_err_froh_0err_gmore.txt", sep = ",", quote = FALSE, row.names = F)
+
+FROHvserr0
+```
+
+
+```{r}
+F_ROH_ID %>% 
+  filter(birth == 100) %>% 
+  mutate(Err = factor(Err)) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  #pivot_wider(names_from = Err , values_from = FROH) %>% 
+  #pivot_longer(cols = starts_with("0.0"), names_to = "Err", values_to = "FROH") %>% 
+  #rename(Err_0 = "0") %>% 
+  ggplot(aes(x = F_IBD_BPP, y = FROH, colour = factor(Err) ))+
+  geom_point(size = 0.3)+
+  geom_line(aes(y = F_IBD_BPP), colour = "black", )+
+  facet_grid(rows = vars(Method), cols = vars(Dens))+
+  theme_minimal()+
+  theme( legend.position = "top") +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  labs(color = "Error rate", x = expression(paste(F[IBD])), y = expression(paste(F[ROH])))
+
+
+
+```
+
+
+```{r}
+# table 
+
+df_tbl <- F_ROH_ID %>%
+  filter(birth %in% c(20,40,100)) %>% 
+  mutate(Method = factor(Method, c("Norm_small","Norm","Default","Meyermans"))) %>% 
+  group_by(Dens,Err,Method,birth) %>%
+  mutate(correlation = round(cor(FROH, F_IBD_BPP), 4),
+         xpos = min(F_IBD_BPP, na.rm = TRUE),
+         ypos =0.95 + ifelse(Dens =="Full_Dens",0.10,0 ), 
+         diff = round(mean(FROH - F_IBD_BPP),2) )
+
+
+# Calculate regression equations and R-squared values for each group
+regressions_tbl <- df_tbl %>%
+  do(tidy(lm(F_IBD_BPP ~ FROH, data = .))) %>%
+  select(!std.error:p.value) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  mutate(eq = paste0("y = ",round(`(Intercept)`,2),"+x", round(`FROH`,2) ),
+        beta = paste0(round(`FROH`,2) ),
+         ypos = 0.75 + ifelse(Dens =="Full_Dens",0.10,0 ))
+
+regs <- left_join(regressions_tbl, unique(df_tbl[,c("Dens","Method","Err", "birth","correlation","diff")]),
+                  by = c("Dens","Method","Err", "birth"),
+                  relationship = "one-to-many")
+
+regs_w <- regs %>%
+  select(c("Dens","Err","Method", "birth","correlation","beta","diff")) %>% 
+  rename(Dens  = "Dens",
+         Method = "Method", 
+         Corr = "correlation",
+         Generation = "birth") %>% 
+  pivot_wider(names_from = Method, values_from = c( beta, Corr, diff))
+
+
+ 
+column_names <- names(regs_w)
+
+non_numeric_columns <- c("Err","Dens", "Generation")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+FROR_err_FIBD <- regs_w %>%
+  select(all_of(sorted_column_names))
+
+FROR_err_FIBD
+write.table(FROR_err_FIBD, file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/beta_err_froh_fibd_moregen.txt", sep = ",", quote = FALSE, row.names = F)
+```
+
+
+
+## Err power 
+
+```{r}
+Power <- data.frame()
+for (i in 1:nrow(combinations_err)) {
+  dataset <- combinations_err$dataset[i]
+  dens <- combinations_err$dens[i]
+  method <- combinations_err$method[i]
+  err <- combinations_err$err[i]
+  
+
+  power_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",err,"/ROH_Power.csv.gz")) %>% 
+    select(-result) %>% 
+    mutate(Dataset = dataset, Dens = dens, Method = method, Err = err)
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  power_t <- left_join(power_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  
+  info_ADAM <- read.csv(paste0(input.dir, "/", dataset, "/IBD_segments/info_ADAM_roh_bin.txt")) %>%
+    filter(ID %in% ped$id) %>%
+    mutate(length_kb = (stop_bpp-start_bpp)/1000)
+  
+  power_t <- left_join(power_t, info_ADAM[ ,c(1,2,8)], by = c("ID","ROH"= "run") ) 
+  
+  Power = rbind(Power, power_t)
+}
+
+breakpoints <- c(0, 1000, 2000, 3000, 4000, 5000, 9000, Inf)
+labels <- c("0_1MB", "1_2MB", "2_3MB", "3_4MB", "4_5MB", "5_9MB", "9MB+")
+
+# Use cut to create the bin_vec
+bin_vec <- cut(Power$length_kb, breaks = breakpoints, labels = labels, right = FALSE)
+
+bin_vec_fac_2 <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
+
+Power$BIN <- bin_vec_fac_2
+```
+
+
+```{r}
+Power %>% 
+  mutate(Err = as.factor(Err),
+         BIN = as.factor(BIN)) %>% 
+  ggplot(aes(x = BIN, y= pros_right, fill = factor(birth) ))+
+  geom_boxplot(outlier.size = 0.1) +
+  facet_grid(rows = vars(Err), cols = vars(Method))+
+    theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           ) +
+    guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  labs(y = "power %")
+
+```
+
+
+```{r}
+Power %>% 
+  filter(birth == 100) %>% 
+  mutate(Err = as.factor(Err),
+         BIN = as.factor(BIN)) %>% 
+  ggplot(aes(x = BIN, y= pros_right, fill = factor(Method) ))+
+  geom_boxplot(outlier.size = 0.1) +
+  facet_grid(rows = vars(Err), cols = vars(Dens))+
+    theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           ) +
+    guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  labs(y = "power %", title = "Only gen. 100")
+
+```
+
+
+## Err true positive 
+
+
+```{r}
+true_pos <- data.frame()
+for (i in 1:nrow(combinations_err)) {
+  dataset <- combinations_err$dataset[i]
+  dens <- combinations_err$dens[i]
+  method <- combinations_err$method[i]
+  err <- combinations_err$err[i]
+  
+  
+  true_pos_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",err,"/PLINK_ROH_IBD_vs_IBS.res.bz2")) %>% 
+    select(-results) %>% 
+    mutate(Dataset = dataset, Dens = dens, Method = method, Err = err)
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  true_pos_t <- left_join(true_pos_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  
+  ROH <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",err,"/ROH_analyse.hom")) %>%
+    select(c(IID, KB, NSNP)) %>%
+    rename(ID = IID) %>%
+    filter(ID %in% ped$id) %>%
+    group_by(ID) %>%
+    mutate(run = row_number())
+
+  
+  true_pos_t <- left_join(true_pos_t, ROH, by = c("ID","ROH"= "run") ) 
+  
+  true_pos = rbind(true_pos, true_pos_t)
+}
+
+# Use cut to create the bin_vec
+bin_vec <- cut(true_pos$KB, breaks = breakpoints, labels = labels, right = FALSE)
+
+bin_vec_fac_2 <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
+
+true_pos$BIN <- bin_vec_fac_2
+
+true_pos <- true_pos %>% 
+  mutate(TP = IBD/N_SNPs)
+
+```
+
+
+```{r}
+o <- Power %>% 
+    mutate(Generation = birth) %>% 
+  filter(Generation == 100) %>% 
+  group_by(Dens,Err,Method,BIN) %>% 
+  summarise(n = n(),
+            mean_pow = mean(pros_right,na.rm = TRUE), 
+            SE_pow = round(sd(pros_right) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_pow, SE_pow))
+
+o2 <- true_pos %>% 
+    mutate(Generation = birth) %>% 
+   filter(Generation == 100) %>% 
+  group_by(Dens,Err,Method,BIN) %>% 
+  summarise(n = n(),
+            mean_TP = mean(TP,na.rm = TRUE), 
+            SE_TP = round(sd(TP) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_TP, SE_TP))
+
+
+o3 <- left_join(o, o2, by=c("Err","Dens","BIN")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","Err","BIN")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+sorted_power <-  o3 %>%
+  select(all_of(sorted_column_names)) %>% 
+  write.table(file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/err_power_TP.txt", sep = ",", quote = FALSE, row.names = F)
+
+```
+
+```{r}
+o <- Power %>% 
+    mutate(Generation = birth) %>% 
+  filter(Generation == 100) %>% 
+  group_by(Dens,Err,Method) %>% 
+  summarise(n = n(),
+            mean_pow = mean(pros_right,na.rm = TRUE), 
+            SE_pow = round(sd(pros_right) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_pow, SE_pow))
+
+o2 <- true_pos %>% 
+    mutate(Generation = birth) %>% 
+   filter(Generation == 100) %>% 
+  group_by(Dens,Err,Method) %>% 
+  summarise(n = n(),
+            mean_TP = mean(TP,na.rm = TRUE), 
+            SE_TP = round(sd(TP) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_TP, SE_TP))
+
+
+o3 <- left_join(o, o2, by=c("Err","Dens")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","Err")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+sorted_power_OA <-  o3 %>%
+  select(all_of(sorted_column_names)) %>% 
+  write.table(file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/err_pow_tp_TP_OA.txt", sep = ",", quote = FALSE, row.names = F)
+
+```
+
+
+```{r}
+
+u <- Power %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,Err,Method,Generation,BIN) %>% 
+  summarise(n = n(),
+            mean_pow = mean(pros_right,na.rm = TRUE), 
+            SE_pow = round(sd(pros_right) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)#%>% 
+  #pivot_wider(names_from = BIN, values_from = c(mean_pow, SE_pow))
+
+u2 <- true_pos %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,Err,Method,Generation,BIN) %>% 
+  summarise(n = n(),
+            mean_TP = mean(TP,na.rm = TRUE), 
+            SE_TP = round(sd(TP) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)#%>% 
+  #pivot_wider(names_from = BIN, values_from = c(mean_TP, SE_TP))
+
+
+u3 <- left_join(u, u2, by=c("Err","Dens","Method","Generation","BIN")) %>% 
+  select(-contains("SE"))
+
+```
+
+
+```{r}
+
+u3 %>% 
+  ggplot(aes(x = BIN, y = mean_pow, colour = factor(Err),shape= factor(Dens), linetype =factor(Dens) ))+   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  geom_point(size= 1, )+
+  geom_line(aes(group = interaction(Dens, Err))) + 
+  facet_grid(cols = vars(Method), rows = vars(Generation)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) 
+
+```
+```{r}
+u3 %>% 
+  filter(Generation == 100) %>% 
+  ggplot(aes(x = BIN, y = mean_pow, colour = factor(Err))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  geom_point(size= 1, )+
+  geom_line(aes(group =  Err)) + 
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )
+```
+
+
+```{r}
+Power %>% 
+  filter(birth == 100, 
+         length_kb < 10000) %>% 
+  ggplot(aes(x = length_kb, y = pros_right, colour = factor(Err))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  #geom_point(size= 1, )+
+  geom_smooth(method = "gam")+
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )+
+  labs(y = "Power in %")
+  
+```
+
+
+```{r}
+u3 %>% 
+  filter(Generation == 100) %>% 
+  ggplot(aes(x = BIN, y = mean_TP, colour = factor(Err))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  geom_point(size= 1, )+
+  geom_line(aes(group =  Err)) + 
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )
+```
+
+
+
+
+
+```{r, eval=FALSE}
+true_pos %>% 
+  filter(KB<20000) %>% 
+  ggplot(aes(x = KB, y = TP, colour = Method))+
+  geom_point(size = 0.2, alpha = 0.3)+
+    facet_grid(cols = vars(Dens), rows = vars(Err))
+#,
+    #     formula = y ~ x)
+```
+
+```{r}
+
+coef(lm(logit(TP/1)~KB,data=true_pos))
+```
+
+```{r}
+TP_logit<-nls(TP~phi1/(1+exp(-(phi2+phi3*KB))),
+ start=list(phi1=100,phi2=-2.1293484508,phi3=0.0007504979),data=true_pos,trace=TRUE)
+```
+```{r}
+summary(TP_logit)
+```
+
+```{r}
+#set parameters
+coef(lm(logit(TP/1)~KB,data=true_pos))
+```
+
+```{r}
+TP_logit<-nls(TP~phi1/(1+exp(-(phi2+phi3*KB))),
+ start=list(phi1=100,phi2=-2.1293484508,phi3=0.0007504979),data=true_pos,trace=TRUE)
+
+phi1<-coef(TP_logit)[1]
+phi2<-coef(TP_logit)[2]
+phi3<-coef(TP_logit)[3]
+x<-c(min(true_pos$KB, na.rm = TRUE):max(true_pos$KB, na.rm = TRUE)) #construct a range of x values bounded by the data
+y<-phi1/(1+exp(-(phi2+phi3*x))) #predicted mass
+predict<-data.frame(x,y) #create the prediction data frame#And add a nice plot (I cheated and added the awesome inset jpg in another program)
+ggplot(data=true_pos,aes(x=KB,y=TP))+
+geom_point(color='blue',size=0.1)+theme_bw()+
+labs(x='KB',y='True Positive rate')+
+#scale_x_continuous(breaks=c(0,250,500,750, 1000,1250))+
+#scale_y_continuous(breaks=c(0,10,20,30,40,50,60,70,80))+
+theme(axis.text=element_text(size=18),axis.title=element_text(size=24))+
+geom_line(data=predict,aes(x=x,y=y), linewidth=1)
+```
+
+
+```{r}
+
+# Custom logit function to handle boundary conditions
+safe_logit <- function(p) {
+  # Ensure proportions are between 0 and 1
+  p <- pmax(pmin(p, 0.999), 0.001)
+  log(p / (1 - p))
+}
+
+# Improved NLS fitting function with error handling
+fit_nls_model <- function(data) {
+  # Ensure we have enough data points
+  if(nrow(data) < 4) {
+    warning("Not enough data points for model fitting")
+    return(NULL)
+  }
+  
+  tryCatch({
+    # Use max observed value for initial phi1 estimate
+    initial_phi1 <- max(data$TP, na.rm = TRUE)
+    
+    # More robust initial parameter estimation
+    initial_phi2 <- tryCatch(
+      coef(lm(safe_logit(TP/initial_phi1) ~ KB, data = data))[1],
+      error = function(e) -2  # fallback value
+    )
+   initial_phi3 <- tryCatch(
+      coef(lm(safe_logit(TP/initial_phi1) ~ KB, data = data))[2],
+      error = function(e) -2  # fallback value
+    )
+    # Fit NLS with more flexible bounds and control parameters
+    nls_fit <- nls(TP ~ phi1 / (1 + exp(-(phi2 + phi3 * KB))),
+                   start = list(
+                     phi1 = initial_phi1, 
+                     phi2 = initial_phi2, 
+                     phi3 = initial_phi3
+                   ), 
+                   data = data, 
+                   trace = FALSE,
+                   control = nls.control(
+                     maxiter = 100,  
+                     warnOnly = TRUE  
+                   ))
+    
+    # Extract coefficients
+    phi1 <- coef(nls_fit)[1]
+    phi2 <- coef(nls_fit)[2]
+    phi3 <- coef(nls_fit)[3]
+    
+    # Generate predictions with consistent number of points
+    x_predict <- seq(min(data$KB, na.rm = TRUE), 
+                     max(data$KB, na.rm = TRUE), 
+                     length.out = nrow(data))
+    y_predict <- phi1 / (1 + exp(-(phi2 + phi3 * x_predict)))
+    
+    # Return results
+    list(
+      coefficients = c(phi1 = phi1, phi2 = phi2, phi3 = phi3),
+      predictions = data.frame(x_predict = x_predict, y_predict = y_predict),
+      original_data = data
+    )
+  }, error = function(e) {
+    warning(paste("Model fitting failed:", e$message))
+    NULL
+  })
+}
+
+# Data processing with more robust handling
+plot_results <- true_pos %>%
+  filter(birth == 100,
+         KB < 10000) %>% 
+  # Group by your desired variables
+  group_by(Method, Dens, Err) %>%
+  # Nest the data
+  nest() %>%
+  # Apply the NLS model to each nested group
+  mutate(
+    model_results = purrr::map(data, fit_nls_model)
+  ) %>%
+  # Filter out groups where model fitting failed
+  filter(!sapply(model_results, is.null)) %>%
+  # Prepare for plotting
+  mutate(
+    predictions = purrr::map(model_results, "predictions"),
+    original_data = purrr::map(model_results, "original_data"),
+    coefficients = purrr::map(model_results, "coefficients")
+  ) %>%
+  # Unnest carefully
+  select(-data) %>%
+  unnest(c(original_data, predictions))
+
+# Create the plot with faceting and coloring
+ggplot(plot_results, aes(x = KB, y = TP, color = Method)) +
+  #geom_point(size = 0.1, alpha = 0.2) +
+  geom_line(aes(x = x_predict, y = y_predict), linewidth = 1) +
+  facet_grid(rows = vars(Dens), cols = vars(Err)) +
+  labs(
+    x = 'KB', 
+    y = 'TP'
+  ) +
+  theme(
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10),
+    strip.text = element_text(size = 6)
+  )
+```
+
+
+
+```{r}
+true_pos %>% 
+  filter(KB<10000) %>% 
+  ggplot(aes(x = KB, y = TP, colour = factor(Err) ))+
+  #geom_point()
+    geom_smooth(
+    se = TRUE,
+    method = "gam")+
+    facet_grid(cols = vars(Dens), rows = vars(Method), scales = "free_x")+
+  theme( legend.position = "top")
+#,#,MethodsList()
+    #     formula = y ~ x)
+```
+
+
+# MAF
+
+## last og lag alle DF
+
+```{r}
+
+F_ROH_ID_MAF <- data_frame()
+
+for (i in 1:nrow(combinations_maf)) {
+ dataset <- combinations_maf$dataset[i]
+  dens <- combinations_maf$dens[i]
+  method <- combinations_maf$method[i]
+  maf <- combinations_maf$maf[i]
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  
+  F_ROH_ID_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",maf,"_MAF/ROH_analyse.hom.indiv")) %>%
+    select(c(IID, KB, NSEG)) %>%
+    rename(ID = IID) %>%
+    filter(ID %in% ped$id) %>%
+    mutate( Dataset = dataset, Dens = dens, Method = method, MAF = maf)
+
+  F_ROH_ID_t <- left_join(F_ROH_ID_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  F_ROH_ID_MAF = rbind(F_ROH_ID_MAF, F_ROH_ID_t)
+
+} 
+  F_ROH_ID_MAF <- left_join(F_ROH_ID_MAF, length, by= "Dataset")
+
+  F_ROH_ID_MAF <- F_ROH_ID_MAF %>% 
+    mutate(FROH = KB/(length_bpp/1000))
+
+```
+
+```{r}
+F_ROH_ID_MAF <- left_join(F_ROH_ID_MAF, FIBD, by = c("ID" = "ID", "Dataset"= "dataset")) %>%
+  replace(is.na(.), 0)
+```
+
+
+### Distribution of ROH with different levels of MAf 
+```{r}
+ROH_maf <- data.frame()
+for (i in 1:nrow(combinations_maf)) {
+  dataset <- combinations_maf$dataset[i]
+  dens <- combinations_maf$dens[i]
+  method <- combinations_maf$method[i]
+  maf <- combinations_maf$maf[i]
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  
+  ROH_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",maf,"_MAF/ROH_analyse.hom")) %>%
+    select(c(IID, KB, NSNP)) %>%
+    rename(ID = IID) %>%
+    filter(ID %in% ped$id) %>%
+    group_by(ID) %>%
+    mutate(run = row_number(),
+           Dataset = dataset, Dens = dens, Method = method, MAF = maf)
+
+  ROH_t <- left_join(ROH_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  
+  ROH_maf = rbind(ROH_maf, ROH_t)
+}
+
+# Use cut to create the bin_vec
+bin_vec <- cut(ROH_maf$KB, breaks = breakpoints, labels = labels, right = FALSE)
+
+bin_vec_fac_2 <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
+
+ROH_maf$BIN <- bin_vec_fac_2
+
+
+```
+
+### power
+
+```{r}
+Power_maf <- data.frame()
+for (i in 1:nrow(combinations_maf)) {
+  dataset <- combinations_maf$dataset[i]
+  dens <- combinations_maf$dens[i]
+  method <- combinations_maf$method[i]
+  maf <- combinations_maf$maf[i]
+  
+
+  power_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",maf,"_MAF/ROH_Power.csv.gz")) %>% 
+    select(-result) %>% 
+    mutate(Dataset = dataset, Dens = dens, Method = method, MAF = maf)
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  power_t <- left_join(power_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  
+  info_ADAM <- read.csv(paste0(input.dir, "/", dataset, "/IBD_segments/info_ADAM_roh_bin.txt")) %>%
+    filter(ID %in% ped$id) %>%
+    mutate(length_kb = (stop_bpp-start_bpp)/1000)
+  
+  power_t <- left_join(power_t, info_ADAM[ ,c(1,2,8)], by = c("ID","ROH"= "run") ) 
+  
+  Power_maf = rbind(Power_maf, power_t)
+}
+
+breakpoints <- c(0, 1000, 2000, 3000, 4000, 5000, 9000, Inf)
+labels <- c("0_1MB", "1_2MB", "2_3MB", "3_4MB", "4_5MB", "5_9MB", "9MB+")
+
+# Use cut to create the bin_vec
+bin_vec <- cut(Power_maf$length_kb, breaks = breakpoints, labels = labels, right = FALSE)
+
+bin_vec_fac_2 <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
+
+Power_maf$BIN <- bin_vec_fac_2
+```
+
+
+```{r}
+Power_maf %>% 
+  filter(birth == 100, 
+         length_kb < 10000) %>% 
+  ggplot(aes(x = length_kb, y = pros_right, colour = factor(MAF))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  #geom_point(size= 1, )+
+  geom_smooth(method = "gam")+
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )+
+  labs(y = "Power in %")
+  
+```
+
+
+
+### TP
+
+```{r}
+true_pos_maf <- data.frame()
+for (i in 1:nrow(combinations_maf)) {
+  dataset <- combinations_maf$dataset[i]
+  dens <- combinations_maf$dens[i]
+  method <- combinations_maf$method[i]
+  maf <- combinations_maf$maf[i]
+  
+  
+  true_pos_t <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",maf,"_MAF/PLINK_ROH_IBD_vs_IBS.res.bz2")) %>% 
+    select(-results) %>% 
+    mutate(Dataset = dataset, Dens = dens, Method = method, MAF = maf)
+  
+  ped <- read_table(paste0(input.dir, "/", dataset, "/pedigree_rel.generations.txt"),show_col_types = FALSE )
+  true_pos_t <- left_join(true_pos_t, ped[ ,c("id","birth")], by= c("ID"= "id"))
+  
+  
+  ROH <- fread(paste0(tmp.dir,"/",dataset,"/",dens,"/",method,"/",maf,"_MAF/ROH_analyse.hom")) %>%
+    select(c(IID, KB, NSNP)) %>%
+    rename(ID = IID) %>%
+    filter(ID %in% ped$id) %>%
+    group_by(ID) %>%
+    mutate(run = row_number())
+
+  
+  true_pos_t <- left_join(true_pos_t, ROH, by = c("ID","ROH"= "run") ) 
+  
+  true_pos_maf = rbind(true_pos_maf, true_pos_t)
+}
+
+# Use cut to create the bin_vec
+bin_vec <- cut(true_pos_maf$KB, breaks = breakpoints, labels = labels, right = FALSE)
+
+bin_vec_fac_2 <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
+
+true_pos_maf$BIN <- bin_vec_fac_2
+
+true_pos_maf <- true_pos_maf %>% 
+  mutate(TP = IBD/N_SNPs)
+
+```
+
+
+
+```{r}
+true_pos_maf %>% 
+  filter(birth == 100, 
+         KB < 10000) %>% 
+  ggplot(aes(x = KB, y = TP, colour = factor(MAF))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  #geom_point(size= 1, )+
+  geom_smooth(method = "gam")+
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )+
+  labs(y = "True positive rate")
+  
+```
+
+
+```{r}
+o <- Power_maf %>% 
+    mutate(Generation = birth) %>% 
+  filter(Generation == 100) %>% 
+  group_by(Dens,MAF,Method) %>% 
+  summarise(n = n(),
+            mean_pow = mean(pros_right,na.rm = TRUE), 
+            SE_pow = round(sd(pros_right) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_pow, SE_pow))
+
+o2 <- true_pos_maf %>% 
+    mutate(Generation = birth) %>% 
+   filter(Generation == 100) %>% 
+  group_by(Dens,MAF,Method) %>% 
+  summarise(n = n(),
+            mean_TP = mean(TP,na.rm = TRUE), 
+            SE_TP = round(sd(TP) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_TP, SE_TP))
+
+
+o3 <- left_join(o, o2, by=c("MAF","Dens")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","MAF")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+sorted_power_maf <-  o3 %>%
+  select(all_of(sorted_column_names))
+
+write.table(sorted_power_maf, file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/maf_power_TP.txt", sep = ",", quote = FALSE, row.names = F)
+
+```
+
+```{r}
+
+u <- Power_maf %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,MAF,Method,Generation,BIN) %>% 
+  summarise(n = n(),
+            mean_pow = mean(pros_right,na.rm = TRUE), 
+            SE_pow = round(sd(pros_right) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)#%>% 
+  #pivot_wider(names_from = BIN, values_from = c(mean_pow, SE_pow))
+
+u2 <- true_pos_maf %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,MAF,Method,Generation,BIN) %>% 
+  summarise(n = n(),
+            mean_TP = mean(TP,na.rm = TRUE), 
+            SE_TP = round(sd(TP) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)#%>% 
+  #pivot_wider(names_from = BIN, values_from = c(mean_TP, SE_TP))
+
+
+u3 <- left_join(u, u2, by=c("MAF","Dens","Method","Generation","BIN")) %>% 
+  select(-contains("SE"))
+
+
+```
+
+
+
+
+```{r MAF distr and Froh table}
+o <- ROH_maf %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,MAF,Method,Generation) %>% 
+  summarise(n = n(),
+            mean_l = mean(KB), 
+            SE_l = round(sd(KB) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Generation, values_from = c(mean_l, SE_l))
+
+o2 <- F_ROH_ID_MAF %>% 
+    mutate(Generation = birth) %>% 
+  group_by(Dens,MAF,Method,Generation) %>% 
+  summarise(n = n(),
+            mean_FROH = mean(FROH), 
+            SE_FROH = round(sd(FROH) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Generation, values_from = c(mean_FROH, SE_FROH))
+
+
+o3 <- left_join(o, o2, by=c("MAF","Dens","Method")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","MAF","Method")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+sorted_o3 <-  o3 %>%
+  select(all_of(sorted_column_names))
+```
+
+
+
+```{r MAF distr and Froh table, subset }
+o <- ROH_maf %>% 
+    mutate(Generation = birth) %>% 
+  filter(Generation %in% c(100)) %>% 
+  group_by(Dens,MAF,Method) %>% 
+  summarise(n = n(),
+            mean_l = mean(KB), 
+            SE_l = round(sd(KB) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_l, SE_l))
+
+o2 <- F_ROH_ID_MAF %>% 
+    mutate(Generation = birth) %>% 
+    filter(Generation %in% c(100)) %>% 
+  group_by(Dens,MAF,Method) %>% 
+  summarise(n = n(),
+            mean_FROH = mean(FROH), 
+            SE_FROH = round(sd(FROH) / sqrt(n),3) ) %>% 
+  mutate_if(is.numeric, round, digits =3)%>% 
+  select(-n)%>% 
+  pivot_wider(names_from = Method, values_from = c(mean_FROH, SE_FROH))
+
+
+o3 <- left_join(o, o2, by=c("MAF","Dens")) %>% 
+  select(-contains("SE"))
+
+column_names <- names(o3)
+
+non_numeric_columns <- c( "Dens","MAF")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+sorted_o3_100_MAF <-  o3 %>%
+  select(all_of(sorted_column_names))
+```
+
+```{r}
+tibble(sorted_o3_100_MAF)
+```
+
+
+```{r}
+# Number of ROH found per individual
+ROH_maf %>% 
+  group_by(Dataset,Dens,Method,MAF,ID) %>% 
+  mutate(n= n()) %>% 
+  ggplot(aes(x = factor(birth), y = n, colour = factor(Dens)))+
+  geom_boxplot(outlier.size = 0.2)+
+  facet_grid(rows = vars(Method),cols = vars(MAF))+
+    theme( legend.position = "top") +
+  labs(title = "No. of ROH in one individual")
+  
+```
+
+```{r}
+ROH_maf %>% 
+  ggplot(aes(x = factor(birth), y = log10(KB), colour = factor(Dens)))+
+  geom_boxplot(outlier.size = 0.2)+
+  facet_grid(rows = vars(Method),cols = vars(MAF))+
+    theme( legend.position = "top") 
+  
+```
+
+```{r}
+F_ROH_ID_MAF %>% 
+  ggplot(aes(x = factor(birth), y = FROH, colour = factor(Dens)))+
+  geom_boxplot(outlier.size = 0.2)+
+  facet_grid(rows = vars(Method),cols = vars(MAF))+
+    theme( legend.position = "top") 
+  
+```
+
+
+```{r}
+F_ROH_ID_MAF %>% 
+  #filter(birth == 100) %>% 
+  mutate(MAF = factor(MAF)) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  pivot_wider(names_from = MAF , values_from = FROH) %>% 
+  pivot_longer(cols = starts_with("0.0"), names_to = "MAF", values_to = "FROH") %>% 
+  rename(MAF_0 = "0") %>% 
+  ggplot(aes(x = MAF_0, y = FROH, colour = factor(MAF) ))+
+  geom_point(size =0.3)+
+  geom_line(aes(y = MAF_0), colour = "black", )+
+  facet_grid(rows = vars(Method), cols = vars(Dens))
+```
+## Effect of genotyping errors on true positive and power 
+
+
+
+```{r}
+Power_maf %>% 
+  mutate(Err = as.factor(MAF),
+         BIN = as.factor(BIN)) %>% 
+  ggplot(aes(x = BIN, y= pros_right, fill = factor(birth) ))+
+  geom_boxplot(outlier.size = 0.1) +
+  facet_grid(rows = vars(MAF), cols = vars(Method))+
+    theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           ) +
+    guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  labs(y = "power %")
+
+```
+
+
+```{r}
+Power_maf %>% 
+  filter(birth == 100) %>% 
+  mutate(MAF = as.factor(MAF),
+         BIN = as.factor(BIN)) %>% 
+  ggplot(aes(x = BIN, y= pros_right, fill = factor(Method) ))+
+  geom_boxplot(outlier.size = 0.1) +
+  facet_grid(rows = vars(MAF), cols = vars(Dens))+
+    theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           ) +
+    guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  labs(y = "power %", title = "Only gen. 100")
+
+```
+
+
+
+## MAF true positive 
+
+
+```{r}
+u3 %>% 
+  filter(Generation == 100) %>% 
+  ggplot(aes(x = BIN, y = mean_TP, colour = factor(MAF))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  geom_point(size= 1, )+
+  geom_line(aes(group =  MAF)) + 
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )
+```
+
+
+
+
+
+```{r, eval=FALSE}
+true_pos_maf %>% 
+  filter(KB<20000) %>% 
+  ggplot(aes(x = KB, y = TP, colour = Method))+
+  geom_point(size = 0.2, alpha = 0.3)+
+    facet_grid(cols = vars(Dens), rows = vars(MAF))
+#,
+    #     formula = y ~ x)
+```
+
+```{r}
+true_pos_maf %>% 
+  filter(KB<10000) %>% 
+  ggplot(aes(x = KB, y = TP, colour = Method))+
+  #geom_point()
+    geom_smooth(
+    se = TRUE,
+    method = "gam")+
+    facet_grid(cols = vars(Dens), rows = vars(MAF), scales = "free_x")
+#,
+    #     formula = y ~ x)
+```
+
+
+
+
+
+
+```{r}
+u3 %>% 
+  filter(Generation == 100) %>% 
+  ggplot(aes(x = BIN, y = mean_pow, colour = factor(MAF))) +   # shape =Method
+  #ggbeeswarm::geom_quasirandom( size = 1.7, alpha =1, dodge.width = 0.6) +
+  geom_point(size= 1, )+
+  geom_line(aes(group =  MAF)) + 
+  facet_grid(cols = vars(Method), rows = vars(Dens)) +
+  guides(fill = guide_legend(override.aes = list(size = 1, alpha = 1))) +
+  theme( legend.position = "top",
+           #legend.key.size =  unit(0.3, 'cm'),
+           #legend.text = element_text(size = 6),
+           #legend.title = element_text(size = 6)
+           )
+```
+
+
+
+```{r}
+F_ROH_ID_MAF %>% 
+  filter(birth == 100) %>% 
+  mutate(MAF = factor(MAF)) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  #pivot_wider(names_from = Err , values_from = FROH) %>% 
+  #pivot_longer(cols = starts_with("0.0"), names_to = "Err", values_to = "FROH") %>% 
+  #rename(Err_0 = "0") %>% 
+  ggplot(aes(x = F_IBD_BPP, y = FROH, colour = factor(MAF) ))+
+  geom_point(size = 0.3)+
+  geom_line(aes(y = F_IBD_BPP), colour = "black", )+
+  facet_grid(rows = vars(Method), cols = vars(Dens))+
+  theme_minimal()+
+  theme( legend.position = "top") +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  labs(color = "MAF", x = expression(paste(F[IBD])), y = expression(paste(F[ROH])))
+
+
+
+```
+
+
+```{r}
+# table 
+
+df_tbl <- F_ROH_ID_MAF %>%
+  filter(birth %in% c(20,40,100)) %>% 
+  mutate(Method = factor(Method, c("Norm_small","Norm","Default","Meyermans"))) %>% 
+  group_by(Dens,MAF,Method,birth) %>%
+  mutate(correlation = round(cor(FROH, F_IBD_BPP), 4),
+         xpos = min(F_IBD_BPP, na.rm = TRUE),
+         ypos =0.95 + ifelse(Dens =="Full_Dens",0.10,0 ), 
+         diff = round(mean(FROH - F_IBD_BPP),2) )
+
+
+# Calculate regression equations and R-squared values for each group
+regressions_tbl <- df_tbl %>%
+  do(tidy(lm(F_IBD_BPP ~ FROH, data = .))) %>%
+  select(!std.error:p.value) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  mutate(eq = paste0("y = ",round(`(Intercept)`,2),"+x", round(`FROH`,2) ),
+        beta = paste0(round(`FROH`,2) ),
+         ypos = 0.75 + ifelse(Dens =="Full_Dens",0.10,0 ))
+
+regs <- left_join(regressions_tbl, unique(df_tbl[,c("Dens","Method","MAF","birth", "correlation","diff")]),
+                  by = c("Dens","Method","MAF","birth"),
+                  relationship = "one-to-many")
+
+regs_w <- regs %>%
+  select(c("Dens","MAF","Method","birth","correlation","beta","diff")) %>% 
+  rename(Dens  = "Dens",
+         Method = "Method", 
+         Corr = "correlation",
+         Generation = "birth") %>% 
+  pivot_wider(names_from = Method, values_from = c( beta, Corr, diff))
+
+
+ 
+column_names <- names(regs_w)
+
+non_numeric_columns <- c("MAF","Dens","Generation")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+IBD_FROH_MAF <- regs_w %>%
+  select(all_of(sorted_column_names))
+
+IBD_FROH_MAF
+write.table(IBD_FROH_MAF, file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/beta_MAF_froh_fibd_moregen.txt", sep = ",", quote = FALSE, row.names = F)
+```
+
+
+```{r}
+F_ROH_ID_MAF %>% 
+  filter(birth == 100) %>% 
+  mutate(MAF = factor(MAF)) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  pivot_wider(names_from = MAF , values_from = FROH) %>% 
+  pivot_longer(cols = starts_with("0.0"), names_to = "MAF", values_to = "FROH") %>% 
+  rename(MAF_0 = "0") %>% 
+  ggplot(aes(x = MAF_0, y = FROH, colour = factor(MAF) ))+
+  geom_point(size = 0.3)+
+  geom_line(aes(y = MAF_0), colour = "black", )+
+  facet_grid(rows = vars(Method), cols = vars(Dens))+
+  theme_minimal()+
+  theme( legend.position = "top") +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  labs(color = "MAF", x = expression(paste(F[ROH]," for MAF = 0")), y = expression(paste(F[ROH])))
+```
+
+
+
+```{r}
+# table 
+
+df_tbl <- F_ROH_ID_MAF %>%
+  filter(birth == 100) %>% 
+  select(-c("KB", "NSEG")) %>% 
+  pivot_wider(names_from = MAF , values_from = FROH) %>% 
+  pivot_longer(cols = starts_with("0.0"), names_to = "MAF", values_to = "FROH") %>% 
+  rename(MAF_0 = "0") %>% 
+  mutate(Method = factor(Method, c("Norm_small","Norm","Default","Meyermans"))) %>% 
+  group_by(Dens,MAF,Method) %>%
+  mutate(correlation = round(cor(FROH, MAF_0), 4),
+         xpos = min(MAF_0, na.rm = TRUE),
+         ypos =0.95 + ifelse(Dens =="Full_Dens",0.10,0 ), 
+         diff = round(mean(FROH - MAF_0),2) )
+
+
+# Calculate regression equations and R-squared values for each group
+regressions_tbl <- df_tbl %>%
+  do(tidy(lm(MAF_0 ~ FROH, data = .))) %>%
+  select(!std.error:p.value) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  mutate(eq = paste0("y = ",round(`(Intercept)`,2),"+x", round(`FROH`,2) ),
+        beta = paste0(round(`FROH`,2) ),
+         ypos = 0.75 + ifelse(Dens =="Full_Dens",0.10,0 ))
+
+regs <- left_join(regressions_tbl, unique(df_tbl[,c("Dens","Method","MAF", "correlation","diff")]),
+                  by = c("Dens","Method","MAF"),
+                  relationship = "one-to-many")
+
+regs_w <- regs %>%
+  select(c("Dens","MAF","Method","correlation","beta","diff")) %>% 
+  rename(Dens  = "Dens",
+         Method = "Method", 
+         Corr = "correlation") %>% 
+  pivot_wider(names_from = Method, values_from = c( beta, Corr, diff))
+
+
+ 
+column_names <- names(regs_w)
+
+non_numeric_columns <- c("MAF","Dens")
+
+# Sort non-numeric columns first
+sorted_column_names <- c(non_numeric_columns, column_names[order(as.numeric(gsub("\\D", "", column_names)), column_names)])
+
+maf0_FROH_MAF_100 <- regs_w %>%
+  select(all_of(sorted_column_names))
+
+maf0_FROH_MAF_100
+write.table(maf0_FROH_MAF_100, file = "/net/fs-2/scale/OrionStore/Home/odwa/paper-1/ROH-vs-IBD/containment_zone/beta_MAF_froh_maf0_g100.txt", sep = ",", quote = FALSE, row.names = F)
+```
