@@ -140,10 +140,6 @@ info_ADAM_ROH_bin <- info_ADAM_ROH_bin %>%
          stop_kb = stop_bpp/1000)
 
 
-obs_homozyg  <- read_csv(paste0("Dataset/",dataset, "/R_output/all_ind_observed_homozyg_QTL.res.bz2") )
-
-
-
 ID_vec <- unique(info_ADAM_ROH_bin$ID)
 ID_plink <- unique(PLINK_ROH_bin$ID)
 
@@ -189,18 +185,18 @@ for (i in ID_vec){
   segment <- strsplit(IBD_ind, " ")[[1]] # split genome string into a vector 
   segment <- segment[!grepl("^\\s*$", segment)]  #remove all the empty chunks 
   for(run in ind_run_vec) {
-    ind_result$ROH[run] <- run # Store what per ID run it is 
+    ind_result$ROH[run] <- run # Store what per ID loop it is 
     
     start <- info_ind$start_bpp[run] 
     stop <- info_ind$stop_bpp[run]
     
     # Since the IBD segments are found with a text string function, 
-    # Some of the registered segements have only 1 marker. So first i remove them
+    # Some of the registered segements have only 1 marker. So first i exclude them
     if( start == stop){cat("no run", i, run ,"\n")
     }else{
-      rel_marker <- marker_pos$tmp_marker[marker_pos$position_kb >= start & marker_pos$position_kb <= stop]
+      rel_marker <- marker_pos$tmp_marker[marker_pos$position_bpp >= start & marker_pos$position_bpp <= stop]
       
-      # The next issue is that for very short runs sometimes we wont have 
+      # The next issue is that for very short runs sometimes we wont have a 
       # SNP marker between start and stop. these areas are then removed 
       if(length(rel_marker) == 0){cat("no markers", i, run ,"\n")
       }else{
