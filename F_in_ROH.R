@@ -1,482 +1,128 @@
 
-
-# libs 
-library(readr)
-library(tidyverse)
-library(foreach)
-library(doSNOW)
-library(progress)
-library(dplyr)  # Make sure you have dplyr for data manipulation
-
-
 # source("/usr/share/lmod/lmod/init/R")
 # Sys.setenv(MODULEPATH = '/cluster/modules/all')
-# module("load PLINK/2.00a3.6-GCC-11.3.0")
-
-
-datasets <- c("NE200_100cm_rep0",  "NE200_100cm_rep1","NE200_100cm_rep2",
-              "NE100_100cm_rep1"	,"NE100_100cm_rep2")
-
-# make main dir
-dir.create(paste("./Dataset/AlleleFreq", sep = ""))
+# module("load PLINK/1.9b_6.17-x86_64")
 
 # =============
-#   allele freq per dataset and gen
+#   libs 
 # =============
-rel_gen <- c(20,40,60,80,100)
-# make empty dataframe for looping "into"
-tot_AlFreq_data_all  <- data.frame()
+.libPaths("/mnt/users/odwa/R/myLib")
+library(foreach)
+library(doParallel)
+library(doSNOW)
+library(data.table)
+library(readr)
+library(tidyverse)
 
-
-# Since for every new dataset, there are 8 scenarios. These do however use the same markers,
-# meaning that instead of looping over 40 scenarios were now just looping over 5 datasets.
-
-for (dataset in datasets) {
-
-
-  full_ped <- read_csv(paste("Dataset/",dataset,"/full_split.ped", sep = ""),
-                       col_names = FALSE,show_col_types = FALSE)
-
-  colnames(full_ped) <- c("ID", "Geno")
-
-
-  pedigree <- read_table(paste("Dataset/",dataset,"/pedigree_rel.generations.txt",sep = ""),
-                         col_types = cols(birthHerd = col_skip(),
-                                          polyTbv1 = col_skip(), qtlTbv1 = col_skip(),
-                                          residual1 = col_skip(), X11 = col_skip()),show_col_types = FALSE)
-
-  dir.create(paste("./Dataset/",dataset,"/AlleleFreq", sep = "") )
-  dir.create(paste("./Dataset/",dataset,"/AlleleFreq/temp", sep = ""))
-  temp.dir <- paste0("./Dataset/",dataset,"/AlleleFreq/temp")
-
-  tot_AlFreq <- data.frame("#CHROM" = numeric(0), "ID" = numeric(0), "REF" = numeric(0), "ALT" = numeric(0) , "ALT_FREQS" = numeric(0),"OBS_CT" = numeric(0), GEN = numeric(0))
-  # then calculate the generation relative allele freq
-  for (i in rel_gen) {
-    gen <- paste(i)
-    gen_ID <- pedigree %>%
-      filter(birth %in% i) %>%
-      select(id)
-    gen_i_ped <- full_ped %>%
-      filter(ID %in% gen_ID$id)
-    
-    # Make the .ped per generation 
-    info <- data.frame(matrix(nrow = nrow(gen_i_ped), ncol = 6, 0))
-    info[ , 2] <- as.numeric(gen_i_ped$ID)
-    info <- unite(info, info, c(1:6), sep = " ")
-
-    info$Geno <- gen_i_ped$Geno
-
-    write.table(info, file= paste0(temp.dir,"/",i,"_full_gen.ped"),row.names = FALSE, col.names = FALSE,sep = " ",quote = FALSE )
-
-    # make binary fileset
-    system(paste("plink2"," --ped ",temp.dir,"/",i,"_full_gen.ped",
-                 "  --map ./Dataset/",dataset,"/full.map",
-                 "  --make-bed --out ",temp.dir,"/",i,"_full_gen" ,sep="" ) )
-
-    # Then we calc the freqs for all the generations
-    system(paste("plink2 --bfile ",temp.dir,"/",i,"_full_gen",
-                 " --freq --out ",temp.dir,"/",i,"_full_gen" , sep =""))
-
-    # Read and combine it all into one dataframe
-    Allele_freq <- read_table(paste(temp.dir,"/",i,"_full_gen.afreq",sep = "") )
-    Allele_freq$GEN <- seq(i,i, length.out = nrow(Allele_freq) )
-
-    tot_AlFreq <- rbind(tot_AlFreq, Allele_freq)
-  } # rel gen
-
-  tot_AlFreq_data <- tot_AlFreq %>%
-    mutate(dataset = dataset)
-
-  tot_AlFreq_data_all  <-  rbind(tot_AlFreq_data_all, tot_AlFreq_data)
-  print(unlink(temp.dir, recursive=TRUE))
-} # dataset
-
-# Write that dataframe
-write.table(tot_AlFreq_data_all, file= paste("./Dataset/AlleleFreq/AlleleFreqs",sep = ""),sep = "," , quote = FALSE, row.names = FALSE)
-
-
-
-rm(list = setdiff(ls(envir = globalenv()), c("datasets","rel_gen")), envir = globalenv())
-
+source("/mnt/users/odwa/paper-1/ROH-vs-IBD/F_in_ROH_functions.R")
 
 # =============
-#  IBS|ROH 
-# =========
+#   Pathing parameters 
+# =============
 
-# first make the function used when running in parallell 
-process_SNP <- function(SNP, marker_pos_test, ROH_edit_gen, homo_bin_gen, generation) {
 
-  marker <- marker_pos_test$locus[SNP]
-  # output dataframe
-  result <- data.frame(Marker = marker_pos_test$locus[SNP],
-                       tmp_marker = marker_pos$tmp_marker[marker_pos$locus %in% marker],
-                       Generation = generation,
-                       ROH_0_1 = 0,
-                       ROH_1_2 = 0,
-                       ROH_2_3 = 0,
-                       ROH_3_4 = 0,
-                       ROH_4_5 = 0,
-                       ROH_5_9 = 0,
-                       ROH_9 = 0,
-                       hom_ROH_0_1 = 0,
-                       hom_ROH_1_2 = 0,
-                       hom_ROH_2_3 = 0,
-                       hom_ROH_3_4 = 0,
-                       hom_ROH_4_5 = 0,
-                       hom_ROH_5_9 = 0,
-                       hom_ROH_9 = 0)
-  # Then find all the ROH that includes the test marker 
-  for (ROH in 1:nrow(ROH_edit_gen)) {
-    ID <- ROH_edit_gen$ID[ROH]
+NEs = c("NE100","NE200")
+Reps = c(1:10)
+Densities <- c("Full_Dens", "Half_Dens")
+Methods <- c("Meyermans", "Default", "Norm", "Norm_small")
+Gens <- c(10,20,50,100)
 
-    # If the marker is in a ROH find the homozygous binary genome for the relevant individual
-    # and register if the marker is homozygous or heterozygous 
-    if (ROH_edit_gen$SNP1[ROH] <= marker && marker <= ROH_edit_gen$SNP2[ROH]){
-      obs_hom <- strsplit(homo_bin_gen$genome[homo_bin_gen$ID %in% ID], " ")[[1]]
-      pos <- marker_pos$tmp_marker[marker_pos$locus %in% marker]
-      if(obs_hom[pos] == "1" ) {  # Check for character "1"
-        bin <- as.numeric(ROH_edit_gen$BIN[ROH])
-        result[1, 3 + bin] <- result[1, 3 + bin] + 1
-        result[1, 10 + bin] <- result[1, 10 + bin] + 1
-      } else {
-        bin <- as.numeric(ROH_edit_gen$BIN[ROH])
-        result[1, 3 + bin] <- result[1, 3 + bin] + 1
-      }
-    } else {
-      # Handle the else case here if needed
-    }
+proj.dir = "/mnt/project/SimData/Paper_1"
+
+
+# ==============
+#     Cluster
+# =============
+num_cores <- as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", unset = 1))
+
+# Use one less than available cores
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+clusterEvalQ(cl, {
+  .libPaths("/mnt/users/odwa/R/myLib" )
+  library(data.table)
+  library(readr)
+  library(tidyverse)
+})
+
+# ==============
+# calculate allele freqs
+# =============
+df_list <- expand.grid(NE = NEs,Rep = Reps)
+
+foreach(i = 1:nrow(df_list)) %dopar% {
+  NE = df_list$NE[i]
+  Rep = df_list$Rep[i]
+  data.dir = paste0(proj.dir,"/",NE,"/Rep",Rep)
+  
+  Allele_freq_gen(data.dir, Gens)
 
   }
-  return(result)
-}
 
+# ==============
+# calculate frac homozyg
+# =============
+dens_list <- expand.grid(NE = NEs,Rep = Reps, Dens = Densities )
 
-# Then to use this function I loop it over scenario and generation as the allele freq 
-# changes betweeen generations 
-
-scenario_tbl <- read_table("Scenarios",
-                       col_names = FALSE)[c(1:40),]
-colnames(scenario_tbl) <- c("Dataset","Density","Setting")
-
-# nrow(scenario_tbl)
-
-for (scen in 1:nrow(scenario_tbl)) {
-  dataset <- scenario_tbl$Dataset[scen]
-  dens <- scenario_tbl$Density[scen]
-  setting <- scenario_tbl$Setting[scen]
-
-  pedigree <- read_table(paste0("Dataset/",dataset,"/pedigree_rel.generations.txt"),
-                         col_types = cols(sire = col_character(), dam = col_character(),
-                                          X11 = col_skip()), show_col_types = FALSE)
-  # Load SNP map 
-  marker_pos <- read_csv( paste0("Dataset/",dataset,"/R_output/markerPosition_kb.txt"),show_col_types = FALSE)
-  # Load list of test/masked markers
-  marker_pos_test <- read_table(paste0("Dataset/", dataset,"/test.map"),
-                                col_names = FALSE,show_col_types = FALSE)
-  colnames(marker_pos_test) <- c("Chr","locus", "cM", "BPP")
+foreach(i = 1:nrow(dens_list)) %dopar% {
+  NE = dens_list$NE[i]
+  Rep = dens_list$Rep[i]
+  Dens = dens_list$Dens[i]
+  data.dir = paste0(proj.dir,"/",NE,"/Rep",Rep)
   
-  # Load homozygous binary genome
-  homo_bin <- read_csv(paste0("Dataset/",dataset,"/R_output/all_ind_observed_homozyg_QTL.res.bz2"),show_col_types = FALSE)
-  # Load list of ROH
-  ROH_edit <- read_csv(paste0("Dataset/",dataset,"/R_output/",dens,"_Dens/",setting,"/ROH_edit.txt"),show_col_types = FALSE) %>% 
-    filter(ID %in% pedigree$id)
-
-
-  # Categorise the ROH based on what BIN they are in
-  bin_vec <- vector()
-  breakpoints <- c(0, 1000, 2000, 3000, 4000, 5000, 9000, Inf)
-  labels <- c("0_1MB", "1_2MB", "2_3MB", "3_4MB", "4_5MB", "5_9MB", "9MB+")
-  # Use cut to create the bin_vec
-  bin_vec <- cut(ROH_edit$KB, breaks = breakpoints, labels = labels, right = FALSE)
-  bin_vec <- factor(bin_vec, levels = c("0_1MB", "1_2MB" , "2_3MB" , "3_4MB" , "4_5MB","5_9MB","9MB+" ))
-  ROH_edit$BIN <- bin_vec
-
-  # Set the number of cores you want to use for parallel processing
-  #num_cores <- 5   # Change this to the number of cores you want to use
-  num_cores <- as.integer(Sys.getenv("SLURM_NTASKS",unset = 1))
-  cat("I'm using ",num_cores," Cores \n")
-
-  # Initialize a parallel cluster with doSNOW
-  cl <- makeCluster(num_cores)
-  registerDoSNOW(cl)
-
-  # Create a progress bar for generations
-  total_generations <- length(rel_gen)
-
-  # Initialize all_result with the desired number of columns
-  all_result <- data.frame( Marker = numeric(0),
-                            tmp_marker= numeric(0),
-                            Generation = numeric(0),
-                            ROH_0_1 = numeric(0),
-                            ROH_1_2 = numeric(0),
-                            ROH_2_3 = numeric(0),
-                            ROH_3_4 = numeric(0),
-                            ROH_4_5 = numeric(0),
-                            ROH_5_9 = numeric(0),
-                            ROH_9 = numeric(0),
-                            hom_ROH_0_1 = numeric(0),
-                            hom_ROH_1_2 = numeric(0),
-                            hom_ROH_2_3 = numeric(0),
-                            hom_ROH_3_4 = numeric(0),
-                            hom_ROH_4_5 = numeric(0),
-                            hom_ROH_5_9 = numeric(0),
-                            hom_ROH_9 = numeric(0))
-
-
-  # Iterate over generations
-  for (generation in rel_gen) {
-
-    gen_ID <- pedigree %>%
-      filter(birth %in% generation) %>%
-      select(id)
-
-    homo_bin_gen <- homo_bin[homo_bin$ID %in% gen_ID$id,]
-    ROH_edit_gen <- ROH_edit[ROH_edit$ID %in% gen_ID$id, ]
-
-    # List of SNPs to process
-    SNPs <- seq_along(marker_pos_test$locus)
-
-    # Use foreach to parallelize the loop over SNPs
-    results_list <- foreach(SNP = SNPs, .packages = c("foreach", "doSNOW")) %dopar% {
-      result <- process_SNP(SNP, marker_pos_test, ROH_edit_gen, homo_bin_gen, generation)
-      result
-    }
-
-    # Combine the results into a single data frame for this generation
-    generation_result <- do.call(rbind, results_list)
-
-    # Append the results for this generation to the corresponding rows in all_result
-    all_result <- rbind(all_result, generation_result)
-    cat(generation, "\n")
-  }# rel_gen
-
-  # Stop the parallel cluster when done
-  stopCluster(cl)
-
-  # Save the result to a file
-  write.table(all_result, paste0("Dataset/",dataset,"/R_output/",dens,"_Dens/",setting,"/ROH_state_F_ROH_loop_bin.txt"),
-              row.names = FALSE, quote = FALSE)
-
-  cat(scen, "\n")
-} # scen
-
-rm(list = setdiff(ls(envir = globalenv()), c("datasets","rel_gen")), envir = globalenv())
-
-# ==================
-#
-# Now count the hom per gen per dataset regardless of masked marker being in a ROH or not
-#
-# ==================
-
-
-# ==================
-# The function we're feeding to the cores
-# This one is running parallell over individual 
-# ==================
-
-process_ID <- function(i, marker_pos_test, ROH_edit_gen, homo_bin_gen) {
-  obs_hom <- strsplit(homo_bin$genome[i], " ")[[1]]
-
-  result <- data.frame(locus = marker_pos_test$locus,
-                       tmp_marker = marker_pos_test$tmp_marker,
-                       Generation = homo_bin$Generation[i],
-                       ID = homo_bin$ID[i],
-                       obs_hom = 0)
-
-  vec_hom <- numeric(0)
-  for (marker in marker_pos_test$tmp_marker) {
-    if (obs_hom[marker] == "1") {
-      vec_hom <- c(vec_hom, 1)
-    }else{
-      vec_hom <- c(vec_hom, 0)
-    }# else
-
-
-  } # test_marker
-  result$obs_hom <- vec_hom
-  return(result)
+  homo_test(data.dir, NE, Rep, Dens, rel_gen)
 }
 
 
-# ===========
-# The nested loop over dataset and density 
-# The different densities have different masked markers
-# even though they are in the same dataset. 
-# ===========
 
+# Generate all combinations of dataset, density, method, and err
+combinations <- expand.grid(NE = NEs,Rep = Reps, Dens = Densities, Method = Methods, Gen = Gens)
 
+results_list <- foreach(i = c(1:nrow(combinations)), .packages = c("foreach", "doSNOW","tidyverse","data.table"),
+                        .export = c("process_SNP","hom_in_ROH","F_in_ROH")) %dopar% { 
+  
+  NE = combinations$NE[i]
+  Rep = combinations$Rep[i] 
+  Dens = combinations$Dens[i]
+  Method = combinations$Method[i]
+  Gen = combinations$Gen[i]
+  
+  data.dir = paste0(proj.dir,"/",NE,"/Rep",Rep)
+  roh.dir <-  paste0(data.dir,"/",Dens,"/",Method)
 
-all_dataset <- c("NE200_100cm_rep0","NE200_100cm_rep1","NE200_100cm_rep2",
-                 "NE100_100cm_rep1","NE100_100cm_rep2")
+  ped <- fread(file.path(data.dir, "pedigree_rel_generations.txt")) %>% 
+    filter(birth == Gen) 
 
-densities <- c("Full", "Half")
+  roh <- fread(paste0(roh.dir,"/ROH_analyse.hom")) %>% 
+    filter(IID %in% ped$id)
+  
+  marker_freq_all <- read.csv(paste0(data.dir,"/AlleleFreqs_gens.txt" )) %>% 
+    filter(GEN == Gen)
+  homozyg_marker_all <- read_csv(paste0(data.dir,"/",Dens,"/homozyg_test_markers.txt"),show_col_types = FALSE) %>% 
+    filter(Generation == Gen)
+  
+  if (nrow(roh)>0) {
+    hom_in_ROH(data.dir, roh.dir, Dens, Gen)
+    
+    t2 <- F_in_ROH(homozyg_marker_all, marker_freq_all, data.dir, roh.dir,Gen)
+    t2 <- t2 %>% 
+      mutate(NE = NE,
+             Rep = Rep,
+             Dens = Dens,
+             Method = Method, 
+             Gen = Gen)
+    
+    return(t2)
+  }
+  
+}
 
-# Set the number of cores you want to use for parallel processing
-#num_cores <- 20   # Change this to the number of cores you want to use
-num_cores <- as.integer(Sys.getenv("SLURM_NTASKS",unset = 1))
-
-# Initialize a parallel cluster with doSNOW
-cl <- makeCluster(num_cores)
-registerDoSNOW(cl)
-
-
-tot_dataset_res  <- data.frame()
-
-for (dataset in all_dataset) {
-
-  for (dens in densities) {
-
-
-    # ALl parameter combinations use the same base dataset, so we can reduce the loop from 40* n_animals to 5 *n_animals.
-
-    # The only thing I need here is what year the individual is born in
-    pedigree <- read_table(paste0("Dataset/",dataset,"/pedigree_rel.generations.txt"),
-                           col_types = cols(sire = col_character(), dam = col_character(),
-                                            X11 = col_skip()), show_col_types = FALSE)
-
-    # The pre-processed homo/hetero state for all the markers
-    homo_bin <- read_csv(paste0("Dataset/", dataset,"/R_output/all_ind_observed_homozyg_QTL.res.bz2"), show_col_types = FALSE)
-    # attach the generation, so I only need to search one dataframe in the ID loop
-    homo_bin <- left_join(homo_bin, pedigree[,c(1,5)], by = c("ID" = "id") ) %>%
-      mutate(Generation = birth)
-
-    # since I had to remove markers that didn't have any position i needed to create a second
-    # set of names. So TMP_marker is the observable position in the genome.
-
-    marker_pos <- read_csv( paste0("Dataset/", dataset,"/R_output/markerPosition_kb.txt"),show_col_types = FALSE)
-    if (dens == "Half") {
-      marker_pos_test <- read_table(paste0("Dataset/", dataset,"/","train_50_test.map"),
-                                    col_names = FALSE,show_col_types = FALSE)
-      colnames(marker_pos_test) <- c("Chr","locus", "cM", "BPP")
-    }else{
-      marker_pos_test <- read_table(paste0("Dataset/", dataset,"/test.map"),
-                                    col_names = FALSE,show_col_types = FALSE)
-      colnames(marker_pos_test) <- c("Chr","locus", "cM", "BPP")
-    } #ELSE
-
-    # attach the observable position.
-    marker_pos_test <- left_join(marker_pos_test, marker_pos[,c("locus","tmp_marker")], by = "locus") %>%
-      arrange(BPP)
-
-    # To save myself some time we parallellize over ID
-
-    results_list <- foreach(i = c(1:nrow(homo_bin)), .packages = c("foreach", "doSNOW", "dplyr")) %dopar% {
-      result <- process_ID(i, marker_pos_test, homo_bin)
-      result
-    }
-
-    # Combine the results into a single data frame for this generation
-    ID_result <- do.call(rbind, results_list)
-
-    ID_result_2 <- ID_result %>%
-      group_by(Generation, locus, tmp_marker ) %>%
-      summarise(obs_homo = sum(obs_hom),
-                n_ind = n() ) %>%
-      mutate(dataset = dataset,
-             density = dens)
-
-    tot_dataset_res <- rbind(tot_dataset_res, ID_result_2)
-
-  } #dens
-
-} #dataset
+# Stop the cluster after processing
 
 stopCluster(cl)
 
-tot_dataset_res <- tot_dataset_res %>%
-  mutate(frac_homo = obs_homo/n_ind) %>%
-  mutate(dataset = gsub("_train_50", "", dataset),
-         dataset = gsub("_train", "", dataset)) %>%
-  distinct()
+ID_result <- do.call(rbind, results_list)
 
 
-write.table(tot_dataset_res, file = paste("./Dataset/AlleleFreq/homozyg_test_markers.txt", sep = ""),sep = "," , quote = FALSE, row.names = FALSE)
-
-
-
-
-
-# ===========
-#   Then the formula loop 
-# ===========
-scenario_tbl <- read_table("Scenarios",
-                       col_names = FALSE)
-colnames(scenario_tbl) <- c("Dataset","Density","Setting")
-
-# load the two dataframes that include all the datasets.
-
-homozyg_marker_all <- read_csv("Dataset/AlleleFreq/homozyg_test_markers.txt",show_col_types = FALSE)
-marker_freq_all <- read.csv(paste("Dataset/AlleleFreq/AlleleFreqs",sep = ""))
-
-
-ROH_res_scen_2 <- data.frame()
-
-
-for (scen in 1:nrow(scenario_tbl)) {
-
-  dataset_n <-  scenario_tbl$Dataset[scen]
-  dens <-  scenario_tbl$Density[scen]
-  setting <-  scenario_tbl$Setting[scen]
-
-  marker_freq <- marker_freq_all %>%
-    filter(dataset == dataset_n)
-
-  homozyg_marker <- homozyg_marker_all %>%
-    filter(dataset == dataset_n)
-
-  ROH_state <- read_table(paste0("Dataset/",dataset_n,"/R_output/",dens,"_Dens/",setting,"/ROH_state_F_ROH_loop_bin.txt"),show_col_types = FALSE)
-  # Rename from so a string pattern can be used to pivot longer
-  colnames(ROH_state) <- c("Marker","tmp_marker", "Generation",
-                           "ROH-0_1", "ROH-1_2", "ROH-2_3" ,"ROH-3_4", "ROH-4_5", "ROH-5_9", "ROH-9",
-                           "hom_ROH-0_1", "hom_ROH-1_2", "hom_ROH-2_3", "hom_ROH-3_4", "hom_ROH-4_5",
-                           "hom_ROH-5_9", "hom_ROH-9")
-  ROH_state <- ROH_state %>%
-    pivot_longer(
-      cols = starts_with("ROH") | starts_with("hom_ROH"),
-      names_to = c(".value", "BIN"),
-      names_sep = "-"
-    ) %>%
-    rename(
-      hom_obs = hom_ROH,
-      ROH_obs = ROH
-    ) %>%
-    mutate(Dataset = dataset_n,
-           Density = dens,
-           Setting = setting)
-  # attach frequency information for the test markers
-  ROH_state_freq <- left_join(ROH_state, marker_freq[,c(2,5,7)], by = c("Marker" = "ID", "Generation" = "GEN"))
-  # attach homozyg count 
-  ROH_state_freq_2 <- left_join(ROH_state_freq, homozyg_marker[, c(1,2,4,5,8)],
-                                by = c("Marker" = "locus", "Generation" = "Generation"),
-                                relationship = "many-to-many")
-
-  # Since the masked markers were selected based on MAF in generation 100, 
-  # I do a second MAF filtering here to filter all crazy markers
-  tester = ROH_state_freq_2 %>%
-    filter(ROH_obs > 0,
-           ALT_FREQS > 0.05) %>%
-    group_by(Generation, BIN) %>%
-    summarise(sum_ROH = sum(ROH_obs),
-              sum_hom = sum(hom_obs),
-              sum_hom_ROH = sum_hom/sum_ROH,
-              mean_2pq = mean(2*ALT_FREQS* (1-ALT_FREQS)),
-              mean_hom_frac = mean(frac_homo)
-    )
- 
-  # F_ROH_sum_frq = based on marker freq. not used in the paper
-  # F_ROH_sum_frac = based on fraction of homosyg. Used in the paper
-  t2 = tester %>%
-    mutate(F_ROH_sum_frq = 1 -( (1-sum_hom_ROH )/ mean_2pq),
-           F_ROH_sum_frac = 1 -( (1-sum_hom_ROH )/ mean_hom_frac),
-           Dataset = dataset_n,
-           Density = dens,
-           Setting = setting,
-    )
-
-  ROH_res_scen_2 <-   rbind(ROH_res_scen_2, t2)
-} #scenario
-
-
-
-write.table(ROH_res_scen_2, file= paste("./Dataset/AlleleFreq/F_ROH_results_v3",sep = ""),sep = "," , quote = FALSE, row.names = FALSE)
+write.table(ID_result, file= file.path(proj.dir,"Results/F_in_ROH_results"),sep = "," , quote = FALSE, row.names = FALSE)
 
