@@ -42,7 +42,7 @@ vcferr <- function(vcf, errProb, outpath) {
     cat(paste0("The average amount of error generated: ",err.counter/ncol(vcfFile), "\n"))
     vcfPrefix <- as.character(strsplit(vcf, ".vcf")[[1]])
     cat(paste("Writing output to ", vcfPrefix, ".err.vcf", sep=""), "\n")
-    write.table(vcfFile, paste0(outpath,"/",errProb,".err.vcf", sep=""), sep="\t", col.names=F, row.names=F, quote=F)
+    write.table(vcfFile, paste0(outpath,errProb,".err.vcf", sep=""), sep="\t", col.names=F, row.names=F, quote=F)
 
 }
 

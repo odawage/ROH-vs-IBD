@@ -193,10 +193,10 @@ RohTruePos <- function(ROH_inf, obs_IBD, obs_homo,marker_pos, tmp.dir) {
     IBD_geno <- strsplit(IBD_gen, " ")[[1]] 
     
     run_inf <- ROH_inf[run, ]
-    start <- run_inf$SNP1
-    stop <- run_inf$SNP2
+    start <- run_inf$POS1
+    stop <- run_inf$POS2
     
-    rel_markers <-  marker_pos$tmp_marker [marker_pos$locus >= start & marker_pos$locus <= stop]
+    rel_markers <-  marker_pos$tmp_marker[marker_pos$position_bpp >= start & marker_pos$position_bpp <= stop]
     
     run_markers <- vector()
     for (marker in rel_markers) {
@@ -246,7 +246,7 @@ RohTruePos <- function(ROH_inf, obs_IBD, obs_homo,marker_pos, tmp.dir) {
   # Apply the count_unique function to all rows and combine results into a data frame
   combined_result <- all_runs %>%
     group_by(ID, ROH) %>%
-    summarise(result = list(count_unique(results))) %>%
+    dplyr::summarise(result = list(count_unique(results))) %>%
     unnest(result) %>%
     pivot_wider(names_from = Number, values_from = Count, values_fill = 0)
   
